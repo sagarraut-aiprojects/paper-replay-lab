@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Paper Trading Replay Lab</title>
+<style>
+:root{--bg:#f2f5f4;--fg:#18272b;--mut:#5d6f73;--card:#fff;--line:#d3dcdb;--up:#17803d;--dn:#b3382c;--acc:#0f6b6b;color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f1618;--fg:#e3ecec;--mut:#8da2a5;--card:#162124;--line:#263538;--up:#3fb871;--dn:#e5675a;--acc:#4cc2c2;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#0f1618;--fg:#e3ecec;--mut:#8da2a5;--card:#162124;--line:#263538;--up:#3fb871;--dn:#e5675a;--acc:#4cc2c2;color-scheme:dark}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:980px;margin:0 auto;padding:20px 16px 40px}
+h1{font-size:22px;margin:0 0 4px;letter-spacing:-.01em}
+.sub{color:var(--mut);margin:0 0 16px;max-width:70ch}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:14px}
+.ctl{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;align-items:end}
+label{display:block;font-size:12.5px;color:var(--mut);margin-bottom:3px}
+select,input[type=number],button{width:100%;font:inherit;padding:7px 8px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--fg)}
+button{cursor:pointer;background:var(--acc);color:var(--bg);border-color:var(--acc);font-weight:600}
+button.alt{background:var(--bg);color:var(--fg);border-color:var(--line)}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.hint{font-size:12.5px;color:var(--mut);margin:8px 0 0}
+.big{display:flex;flex-wrap:wrap;gap:6px 28px;align-items:baseline;margin-bottom:6px}
+.val{font-size:34px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.pl{font-size:18px;font-variant-numeric:tabular-nums}
+.up{color:var(--up)}.dn{color:var(--dn)}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-top:10px}
+.stats div{font-size:12.5px;color:var(--mut)}
+.stats b{display:block;font-size:16px;color:var(--fg);font-variant-numeric:tabular-nums}
+canvas{width:100%;display:block}
+#ce{height:230px}#cp{height:170px}
+.cap{font-size:12.5px;color:var(--mut);margin:6px 0 0}
+.badge{display:inline-block;padding:1px 8px;border-radius:99px;background:var(--dn);color:var(--bg);font-size:12.5px;font-weight:600;margin-left:8px}
+.msg{min-height:1.4em;font-size:13px;color:var(--acc);margin-top:8px}
+</style>
+</head>
+<body>
+<main>
+<h1>Paper Trading Replay Lab</h1>
+<p class="sub">Watch a frozen trading rule trade simulated money, one bar at a time. The agent sees the data a set number of bars late, and every cost is charged. Mock data or a file from your own computer only.</p>
+
+<div class="card">
+<div class="ctl">
+<div><label for="strat">Rule the agent follows</label><select id="strat"></select></div>
+<div><label for="delay">Data delay (bars)</label><select id="delay"><option value="0">0 – sees newest bar</option><option value="1" selected>1 bar late</option><option value="2">2 bars late</option><option value="5">5 bars late</option></select></div>
+<div><label for="speed">Replay speed</label><select id="speed"><option value="4">4 bars/sec</option><option value="20">20 bars/sec</option><option value="100" selected>100 bars/sec</option><option value="600">600 bars/sec</option></select></div>
+<div><label for="seed">Mock series number</label><input id="seed" type="number" value="1" min="1" step="1"></div>
+<div><button id="play">Play</button></div>
+<div><button id="reset" class="alt">Reset</button></div>
+</div>
+<div class="ctl" style="margin-top:10px">
+<div style="grid-column:span 2"><label for="file">Or replay your own prices (CSV or Parquet, one symbol, oldest row first, with a close column; stays in this browser)</label><input id="file" type="file" accept=".csv,.txt,.parquet"></div>
+<div><button id="mock" class="alt">Use mock series</button></div>
+</div>
+<div class="msg" id="msg"></div>
+</div>
+
+<div class="card">
+<div class="big"><span class="val" id="val">1,000,000</span><span class="pl" id="pl">0</span><span class="badge" id="ruin" hidden>Ruined: below half the start</span></div>
+<canvas id="ce" aria-label="Paper account value over time"></canvas>
+<p class="cap">Paper account value (dashed line = starting 1,000,000). Costs are 0.03% on each side of every position change; the bet is 1% of the start unless the rule changes it.</p>
+<div class="stats">
+<div>Clock<b id="clk">–</b></div>
+<div>Agent sees up to<b id="seen">–</b></div>
+<div>Position<b id="pos">flat</b></div>
+<div>Trades<b id="trd">0</b></div>
+<div>Costs paid<b id="cst">0</b></div>
+<div>Worst drop from peak<b id="mdd">0%</b></div>
+</div>
+</div>
+
+<div class="card">
+<canvas id="cp" aria-label="Price with the position held"></canvas>
+<p class="cap">Last 400 bars. Green shading = long, red = short. The dashed line marks the newest bar the agent can see.</p>
+</div>
+
+<p class="hint">Simulated money on random or your own data. Not trading advice. Mock series are pure random walks, so no rule should win on average once costs are paid.</p>
+</main>
+<script>
+const B0=1e6,STAKE=1e4,COST=0.0003,SD=0.0035,N=8750,$=id=>document.getElementById(id);
+function rng(s){return function(){s|=0;s=s+0x6D2B79F5|0;let t=Math.imul(s^s>>>15,1|s);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+function mockSeries(seed){const r=rng(seed*7919+13),p=[20000];for(let i=0;i<N;i++){const u=r()||1e-9,v=r(),z=Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);p.push(p[i]*Math.exp(-.5*SD*SD+SD*z))}return p}
+function avg(p,i,n){let s=0;for(let j=i-n+1;j<=i;j++)s+=p[j];return s/n}
+const S={
+ long:{n:"Always long (benchmark)",f:()=>1},
+ trend:{n:"20-bar trend",f:(p,i)=>i<20?0:Math.sign(p[i]-avg(p,i,20))},
+ rev:{n:"20-bar reversal",f:(p,i)=>i<20?0:-Math.sign(p[i]-avg(p,i,20))},
+ mom:{n:"1-bar momentum",f:(p,i)=>i<1?0:Math.sign(p[i]-p[i-1])},
+ brk:{n:"50-bar breakout",f:(p,i,prev)=>{if(i<50)return 0;let hi=-1e18,lo=1e18;for(let j=i-50;j<i;j++){hi=Math.max(hi,p[j]);lo=Math.min(lo,p[j])}return p[i]>hi?1:p[i]<lo?-1:prev}},
+ dbl:{n:"Double the bet after a loss (always long)",f:()=>1,dbl:true}
+};
+for(const k in S){const o=document.createElement("option");o.value=k;o.textContent=S[k].n;$("strat").appendChild(o)}
+$("strat").value="trend";
+let P=mockSeries(1),isMock=true,k=0,pos=0,eq=B0,costs=0,trades=0,mult=1,lastStake=STAKE,peak=B0,mdd=0,EQ=[B0],POS=[0],timer=null,acc=0;
+function reset(){pause();k=0;pos=0;eq=B0;costs=0;trades=0;mult=1;lastStake=STAKE;peak=B0;mdd=0;EQ=[B0];POS=[0];acc=0;draw()}
+function step(){
+ if(k>=P.length-1){pause();$("msg").textContent="End of series.";return}
+ const d=+$("delay").value,s=S[$("strat").value],i=k-d;
+ const np=i>=0?s.f(P,i,pos):0,stake=Math.min(STAKE*mult,5*Math.max(eq,0));
+ const c=COST*Math.abs(np*stake-pos*lastStake);
+ if(np!==pos)trades++;
+ pos=np;lastStake=stake;k++;
+ const pnl=stake*pos*(P[k]/P[k-1]-1);
+ eq+=pnl-c;costs+=c;
+ if(s.dbl)mult=(pnl-c)<0?mult*2:1;
+ peak=Math.max(peak,eq);mdd=Math.max(mdd,(peak-eq)/peak);
+ EQ.push(eq);POS.push(pos);
+ if(eq<=0){pause();$("msg").textContent="Account wiped out."}
+}
+function play(){if(timer)return pause();$("play").textContent="Pause";timer=setInterval(()=>{acc+=(+$("speed").value)/20;while(acc>=1&&timer){step();acc--}draw()},50)}
+function pause(){if(timer){clearInterval(timer);timer=null}$("play").textContent="Play"}
+const fmt=x=>Math.round(x).toLocaleString("en-IN");
+function clock(j){return isMock?"Day "+(Math.floor(j/7)+1)+", "+String(9+j%7).padStart(2,"0")+":15":"Bar "+j}
+function col(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim()}
+function setup(cv){const r=devicePixelRatio||1,w=cv.clientWidth,h=cv.clientHeight;if(cv.width!==Math.round(w*r)){cv.width=Math.round(w*r);cv.height=Math.round(h*r)}const g=cv.getContext("2d");g.setTransform(r,0,0,r,0,0);g.clearRect(0,0,w,h);return[g,w,h]}
+function draw(){
+ const up=col("--up"),dn=col("--dn"),acc=col("--acc"),mut=col("--mut"),fg=col("--fg");
+ // paper value
+ let[g,w,h]=setup($("ce")),pad=8,n=EQ.length,st=Math.max(1,Math.ceil(n/w)),pts=[];
+ for(let j=0;j<n;j+=st)pts.push(EQ[j]);pts.push(EQ[n-1]);
+ let mn=Math.min(B0,...pts),mx=Math.max(B0,...pts);if(mx-mn<2000){mx+=1000;mn-=1000}
+ const Y=v=>h-pad-(v-mn)/(mx-mn)*(h-2*pad);
+ g.strokeStyle=mut;g.setLineDash([4,4]);g.beginPath();g.moveTo(0,Y(B0));g.lineTo(w,Y(B0));g.stroke();g.setLineDash([]);
+ g.strokeStyle=eq>=B0?up:dn;g.lineWidth=2;g.beginPath();
+ pts.forEach((v,j)=>{const x=pad+j/Math.max(1,pts.length-1)*(w-2*pad);j?g.lineTo(x,Y(v)):g.moveTo(x,Y(v))});g.stroke();g.lineWidth=1;
+ // price
+ [g,w,h]=setup($("cp"));
+ const W=Math.min(400,k+1),a=k+1-W;let lo=1e18,hi=-1e18;
+ for(let j=a;j<=k;j++){lo=Math.min(lo,P[j]);hi=Math.max(hi,P[j])}
+ const X=j=>pad+(j-a)/Math.max(1,W-1)*(w-2*pad),Yp=v=>h-pad-(v-lo)/(hi-lo||1)*(h-2*pad);
+ g.globalAlpha=.16;
+ for(let j=a+1;j<=k;j++){if(POS[j]){g.fillStyle=POS[j]>0?up:dn;g.fillRect(X(j-1),0,X(j)-X(j-1)+.5,h)}}
+ g.globalAlpha=1;g.strokeStyle=fg;g.beginPath();
+ for(let j=a;j<=k;j++)j===a?g.moveTo(X(j),Yp(P[j])):g.lineTo(X(j),Yp(P[j]));g.stroke();
+ const d=+$("delay").value;
+ if(d>0&&k-d>=a){g.strokeStyle=acc;g.setLineDash([4,3]);g.beginPath();g.moveTo(X(k-d),0);g.lineTo(X(k-d),h);g.stroke();g.setLineDash([])}
+ // numbers
+ const pl=eq-B0;
+ $("val").textContent=fmt(eq);$("pl").textContent=(pl>=0?"+":"")+fmt(pl);$("pl").className="pl "+(pl>=0?"up":"dn");
+ $("clk").textContent=clock(k);$("seen").textContent=k-d>=0?clock(k-d):"nothing yet";
+ $("pos").textContent=pos>0?"long":pos<0?"short":"flat";$("trd").textContent=trades;
+ $("cst").textContent=fmt(costs);$("mdd").textContent=(mdd*100).toFixed(1)+"%";
+ $("ruin").hidden=eq>=B0*.5;
+}
+$("play").onclick=play;$("reset").onclick=()=>{$("msg").textContent="";reset()};
+$("strat").onchange=$("delay").onchange=()=>{$("msg").textContent="";reset()};
+$("seed").onchange=$("mock").onclick=()=>{isMock=true;P=mockSeries(Math.max(1,+$("seed").value||1));$("msg").textContent="Mock series "+$("seed").value+": 5 years of hourly bars, no pattern built in.";reset()};
+async function readTable(f){
+ const name=f.name.toLowerCase();
+ if(name.endsWith(".parquet")){
+  const {parquetReadObjects}=await import("https://cdn.jsdelivr.net/npm/hyparquet@1.21.1/src/hyparquet.min.js");
+  const rows=await parquetReadObjects({file:await f.arrayBuffer()});
+  if(!rows.length)return[];
+  const keys=Object.keys(rows[0]),key=keys.find(x=>x.toLowerCase()==="close")||keys[keys.length-1];
+  return rows.map(r=>Number(r[key])).filter(x=>x>0);
+ }
+ const L=(await f.text()).trim().split(/\r?\n/),h=L[0].split(",").map(x=>x.trim().toLowerCase());
+ let ci=h.indexOf("close");const hdr=ci>=0||isNaN(+h[h.length-1]);
+ const rows=L.slice(hdr?1:0).map(l=>l.split(","));if(ci<0)ci=rows[0].length-1;
+ return rows.map(r=>+r[ci]).filter(x=>x>0);
+}
+$("file").onchange=async e=>{
+ const f=e.target.files[0];if(!f)return;
+ $("msg").textContent="Reading "+f.name+"...";
+ try{
+  const arr=await readTable(f);
+  if(arr.length<100){$("msg").textContent="Need at least 100 prices in a close column (oldest row first).";return}
+  P=arr;isMock=false;$("msg").textContent="Loaded "+arr.length.toLocaleString("en-IN")+" bars. The file never leaves your browser.";reset();
+ }catch(err){$("msg").textContent="Could not read that file: "+(err&&err.message?err.message:err)+(f.name.toLowerCase().endsWith(".parquet")?" (Parquet with gzip or zstd compression is not supported; save it with snappy or as CSV.)":"")}
+};
+addEventListener("resize",draw);
+matchMedia("(prefers-color-scheme:dark)").addEventListener("change",draw);
+reset();
+</script>
+</body>
+</html>
