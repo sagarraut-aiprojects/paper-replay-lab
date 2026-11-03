@@ -50,21 +50,28 @@ canvas{width:100%;display:block}
 <div><button id="reset" class="alt">Reset</button></div>
 </div>
 <div class="ctl" style="margin-top:10px">
-<div style="grid-column:span 2"><label for="file">Or replay your own prices (CSV or Parquet, one symbol, oldest row first, with a close column; stays in this browser)</label><input id="file" type="file" accept=".csv,.txt,.parquet"></div>
+<div style="grid-column:span 2"><label for="file">Or replay your own prices (CSV or Parquet, one symbol, oldest row first, close column required, open/high/low optional; stays in this browser)</label><input id="file" type="file" accept=".csv,.txt,.parquet"></div>
 <div><button id="mock" class="alt">Use mock series</button></div>
 </div>
+<div class="ctl" style="margin-top:10px">
+<div><label for="pcol">Price column to trade on</label><select id="pcol"><option value="close">Close</option><option value="open">Open</option><option value="high">High</option><option value="low">Low</option></select></div>
+<div><label for="stk">Bet size, % of the starting 1,000,000</label><input id="stk" type="number" value="1" min="0.1" max="100" step="0.1"></div>
+<div><label for="stop">Stop loss, % from entry (0 = off)</label><input id="stop" type="number" value="0" min="0" max="50" step="0.5"></div>
+</div>
+<p class="hint" id="colinfo"></p>
 <div class="msg" id="msg"></div>
 </div>
 
 <div class="card">
 <div class="big"><span class="val" id="val">1,000,000</span><span class="pl" id="pl">0</span><span class="badge" id="ruin" hidden>Ruined: below half the start</span></div>
 <canvas id="ce" aria-label="Paper account value over time"></canvas>
-<p class="cap">Paper account value (dashed line = starting 1,000,000). Costs are 0.03% on each side of every position change; the bet is 1% of the start unless the rule changes it.</p>
+<p class="cap">Paper account value (dashed line = starting 1,000,000). Costs are 0.03% on each side of every position change; the bet is <span id="capstk">1% of the start</span> unless the rule changes it.<span id="capstop"></span></p>
 <div class="stats">
 <div>Clock<b id="clk">–</b></div>
 <div>Agent sees up to<b id="seen">–</b></div>
 <div>Position<b id="pos">flat</b></div>
 <div>Trades<b id="trd">0</b></div>
+<div>Stop-outs<b id="stp">0</b></div>
 <div>Costs paid<b id="cst">0</b></div>
 <div>Worst drop from peak<b id="mdd">0%</b></div>
 </div>
@@ -78,7 +85,7 @@ canvas{width:100%;display:block}
 <p class="hint">Simulated money on random or your own data. Not trading advice. Mock series are pure random walks, so no rule should win on average once costs are paid.</p>
 </main>
 <script>
-const B0=1e6,STAKE=1e4,COST=0.0003,SD=0.0035,N=8750,$=id=>document.getElementById(id);
+const B0=1e6,COST=0.0003,SD=0.0035,N=8750,$=id=>document.getElementById(id);
 function rng(s){return function(){s|=0;s=s+0x6D2B79F5|0;let t=Math.imul(s^s>>>15,1|s);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
 function mockSeries(seed){const r=rng(seed*7919+13),p=[20000];for(let i=0;i<N;i++){const u=r()||1e-9,v=r(),z=Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);p.push(p[i]*Math.exp(-.5*SD*SD+SD*z))}return p}
 function avg(p,i,n){let s=0;for(let j=i-n+1;j<=i;j++)s+=p[j];return s/n}
@@ -92,20 +99,34 @@ const S={
 };
 for(const k in S){const o=document.createElement("option");o.value=k;o.textContent=S[k].n;$("strat").appendChild(o)}
 $("strat").value="trend";
-let P=mockSeries(1),isMock=true,k=0,pos=0,eq=B0,costs=0,trades=0,mult=1,lastStake=STAKE,peak=B0,mdd=0,EQ=[B0],POS=[0],timer=null,acc=0;
-function reset(){pause();k=0;pos=0;eq=B0;costs=0;trades=0;mult=1;lastStake=STAKE;peak=B0;mdd=0;EQ=[B0];POS=[0];acc=0;draw()}
+let STK=1e4,SL=0,stops=0,ent=0,stopDir=0,DATA=null,O=null,H=null,L=null,RNG=false;
+let P=mockSeries(1),isMock=true,k=0,pos=0,eq=B0,costs=0,trades=0,mult=1,lastStake=STK,peak=B0,mdd=0,EQ=[B0],POS=[0],timer=null,acc=0;
+function reset(){pause();
+ STK=B0*Math.min(100,Math.max(.1,+$("stk").value||1))/100;SL=Math.max(0,+$("stop").value||0)/100;
+ const f=x=>(x*100).toFixed(1).replace(/\.0$/,"");
+ $("capstk").textContent=f(STK/B0)+"% of the start";
+ $("capstop").textContent=SL>0?" A stop loss closes a position that falls "+f(SL)+"% from its entry price; the rule then stays out until its signal changes.":"";
+ k=0;pos=0;eq=B0;costs=0;trades=0;mult=1;lastStake=STK;peak=B0;mdd=0;EQ=[B0];POS=[0];acc=0;stops=0;ent=0;stopDir=0;draw()}
 function step(){
  if(k>=P.length-1){pause();$("msg").textContent="End of series.";return}
  const d=+$("delay").value,s=S[$("strat").value],i=k-d;
- const np=i>=0?s.f(P,i,pos):0,stake=Math.min(STAKE*mult,5*Math.max(eq,0));
- const c=COST*Math.abs(np*stake-pos*lastStake);
- if(np!==pos)trades++;
- pos=np;lastStake=stake;k++;
- const pnl=stake*pos*(P[k]/P[k-1]-1);
+ let np=i>=0?s.f(P,i,pos):0;
+ if(stopDir&&np===stopDir)np=0;else stopDir=0;
+ const stake=Math.min(STK*mult,5*Math.max(eq,0));
+ let c=COST*Math.abs(np*stake-pos*lastStake);
+ if(np!==pos){trades++;if(np)ent=P[k]}
+ const held=np;pos=np;lastStake=stake;k++;
+ let px=P[k],hit=false;
+ if(SL>0&&held){
+  const stp=ent*(1-held*SL),t=RNG?(held>0?L[k]:H[k]):P[k];
+  if(held>0?t<=stp:t>=stp){hit=true;if(RNG)px=held>0?Math.min(stp,O[k]):Math.max(stp,O[k])}
+ }
+ const pnl=stake*held*(px/P[k-1]-1);
+ if(hit){c+=COST*stake;stops++;trades++;stopDir=held;pos=0}
  eq+=pnl-c;costs+=c;
  if(s.dbl)mult=(pnl-c)<0?mult*2:1;
  peak=Math.max(peak,eq);mdd=Math.max(mdd,(peak-eq)/peak);
- EQ.push(eq);POS.push(pos);
+ EQ.push(eq);POS.push(held);
  if(eq<=0){pause();$("msg").textContent="Account wiped out."}
 }
 function play(){if(timer)return pause();$("play").textContent="Pause";timer=setInterval(()=>{acc+=(+$("speed").value)/20;while(acc>=1&&timer){step();acc--}draw()},50)}
@@ -139,39 +160,58 @@ function draw(){
  const pl=eq-B0;
  $("val").textContent=fmt(eq);$("pl").textContent=(pl>=0?"+":"")+fmt(pl);$("pl").className="pl "+(pl>=0?"up":"dn");
  $("clk").textContent=clock(k);$("seen").textContent=k-d>=0?clock(k-d):"nothing yet";
- $("pos").textContent=pos>0?"long":pos<0?"short":"flat";$("trd").textContent=trades;
+ $("pos").textContent=pos>0?"long":pos<0?"short":"flat";$("trd").textContent=trades;$("stp").textContent=stops;
  $("cst").textContent=fmt(costs);$("mdd").textContent=(mdd*100).toFixed(1)+"%";
  $("ruin").hidden=eq>=B0*.5;
 }
 $("play").onclick=play;$("reset").onclick=()=>{$("msg").textContent="";reset()};
-$("strat").onchange=$("delay").onchange=()=>{$("msg").textContent="";reset()};
-$("seed").onchange=$("mock").onclick=()=>{isMock=true;P=mockSeries(Math.max(1,+$("seed").value||1));$("msg").textContent="Mock series "+$("seed").value+": 5 years of hourly bars, no pattern built in.";reset()};
+$("strat").onchange=$("delay").onchange=$("stk").onchange=$("stop").onchange=()=>{$("msg").textContent="";reset()};
+$("pcol").onchange=()=>{$("msg").textContent="";applyCols();reset()};
+$("seed").onchange=$("mock").onclick=()=>{DATA=null;isMock=true;P=mockSeries(Math.max(1,+$("seed").value||1));applyCols();$("msg").textContent="Mock series "+$("seed").value+": 5 years of hourly bars, no pattern built in.";reset()};
+function applyCols(){
+ const sel=$("pcol");
+ if(!DATA){O=H=L=null;RNG=false;sel.disabled=true;$("colinfo").textContent="Mock series: one price per bar, so a stop is checked on that price.";return}
+ for(const o of sel.options)o.disabled=!DATA[o.value];
+ const c=sel.value;sel.disabled=false;P=DATA[c];O=DATA.open;H=DATA.high;L=DATA.low;
+ RNG=c==="close"&&!!(O&&H&&L);
+ $("colinfo").textContent="Running on the "+c.toUpperCase()+" price of every bar. Columns found: "+Object.keys(DATA).join(", ")+". "+(RNG?"A stop checks each bar's low (long) or high (short); if a bar opens beyond the stop, it fills at the open.":"A stop is checked only at the "+c+" price, so it fills there, which can be worse than a real stop order.")
+}
 async function readTable(f){
- const name=f.name.toLowerCase();
+ const name=f.name.toLowerCase(),N4=["open","high","low","close"];let recs,keys,note="";
  if(name.endsWith(".parquet")){
   const {parquetReadObjects}=await import("https://cdn.jsdelivr.net/npm/hyparquet@1.21.1/src/hyparquet.min.js");
   const rows=await parquetReadObjects({file:await f.arrayBuffer()});
-  if(!rows.length)return[];
-  const keys=Object.keys(rows[0]),key=keys.find(x=>x.toLowerCase()==="close")||keys[keys.length-1];
-  return rows.map(r=>Number(r[key])).filter(x=>x>0);
+  if(!rows.length)return{D:{}};
+  const raw=Object.keys(rows[0]),low=raw.map(x=>x.toLowerCase()),map={};
+  N4.forEach(n=>{if(low.includes(n))map[n]=raw[low.indexOf(n)]});
+  if(!map.close){map.close=raw[raw.length-1];note="No close column found, so the last column was used as close. "}
+  keys=Object.keys(map);
+  recs=rows.map(r=>{const o={};keys.forEach(n=>o[n]=Number(r[map[n]]));return o});
+ }else{
+  const T=(await f.text()).trim().split(/\r?\n/),h=T[0].split(",").map(x=>x.trim().toLowerCase());
+  const hdr=h.includes("close")||isNaN(+h[h.length-1]),rows=T.slice(hdr?1:0).map(l=>l.split(",")),idx={};
+  if(hdr)N4.forEach(n=>{if(h.includes(n))idx[n]=h.indexOf(n)});
+  if(idx.close===undefined){idx.close=rows[0].length-1;note="No close column found, so the last column was used as close. "}
+  keys=Object.keys(idx);
+  recs=rows.map(r=>{const o={};keys.forEach(n=>o[n]=+r[idx[n]]);return o});
  }
- const L=(await f.text()).trim().split(/\r?\n/),h=L[0].split(",").map(x=>x.trim().toLowerCase());
- let ci=h.indexOf("close");const hdr=ci>=0||isNaN(+h[h.length-1]);
- const rows=L.slice(hdr?1:0).map(l=>l.split(","));if(ci<0)ci=rows[0].length-1;
- return rows.map(r=>+r[ci]).filter(x=>x>0);
+ const ok=recs.filter(r=>keys.every(n=>r[n]>0)),D={};
+ N4.forEach(n=>{if(keys.includes(n))D[n]=ok.map(r=>r[n])});
+ return{D,note}
 }
 $("file").onchange=async e=>{
  const f=e.target.files[0];if(!f)return;
  $("msg").textContent="Reading "+f.name+"...";
  try{
-  const arr=await readTable(f);
-  if(arr.length<100){$("msg").textContent="Need at least 100 prices in a close column (oldest row first).";return}
-  P=arr;isMock=false;$("msg").textContent="Loaded "+arr.length.toLocaleString("en-IN")+" bars. The file never leaves your browser.";reset();
+  const {D,note}=await readTable(f);
+  if(!D.close||D.close.length<100){$("msg").textContent="Need at least 100 rows with a positive close price (oldest row first).";return}
+  DATA=D;isMock=false;$("pcol").value="close";applyCols();
+  $("msg").textContent="Loaded "+D.close.length.toLocaleString("en-IN")+" bars. "+note+"The file never leaves your browser.";reset();
  }catch(err){$("msg").textContent="Could not read that file: "+(err&&err.message?err.message:err)+(f.name.toLowerCase().endsWith(".parquet")?" (Parquet with gzip or zstd compression is not supported; save it with snappy or as CSV.)":"")}
 };
 addEventListener("resize",draw);
 matchMedia("(prefers-color-scheme:dark)").addEventListener("change",draw);
-reset();
+applyCols();reset();
 </script>
 </body>
 </html>
