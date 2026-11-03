@@ -176,10 +176,18 @@ function applyCols(){
  RNG=c==="close"&&!!(O&&H&&L);
  $("colinfo").textContent="Running on the "+c.toUpperCase()+" price of every bar. Columns found: "+Object.keys(DATA).join(", ")+". "+(RNG?"A stop checks each bar's low (long) or high (short); if a bar opens beyond the stop, it fills at the open.":"A stop is checked only at the "+c+" price, so it fills there, which can be worse than a real stop order.")
 }
+let PQ=null;
+async function loadParquet(){
+ if(PQ)return PQ;
+ for(const u of ["https://cdn.jsdelivr.net/npm/hyparquet@1.22.0/+esm","https://cdn.jsdelivr.net/npm/hyparquet/src/hyparquet.min.js","https://cdn.jsdelivr.net/npm/hyparquet@1.21.1/+esm"]){
+  try{const m=await import(u);if(m.parquetReadObjects)return PQ=m}catch(e){}
+ }
+ throw new Error("The Parquet reader could not be loaded from the internet. Check your connection or ad blocker, or save the file as CSV.");
+}
 async function readTable(f){
  const name=f.name.toLowerCase(),N4=["open","high","low","close"];let recs,keys,note="";
  if(name.endsWith(".parquet")){
-  const {parquetReadObjects}=await import("https://cdn.jsdelivr.net/npm/hyparquet@1.21.1/src/hyparquet.min.js");
+  const {parquetReadObjects}=await loadParquet();
   const rows=await parquetReadObjects({file:await f.arrayBuffer()});
   if(!rows.length)return{D:{}};
   const raw=Object.keys(rows[0]),low=raw.map(x=>x.toLowerCase()),map={};
@@ -207,7 +215,7 @@ $("file").onchange=async e=>{
   if(!D.close||D.close.length<100){$("msg").textContent="Need at least 100 rows with a positive close price (oldest row first).";return}
   DATA=D;isMock=false;$("pcol").value="close";applyCols();
   $("msg").textContent="Loaded "+D.close.length.toLocaleString("en-IN")+" bars. "+note+"The file never leaves your browser.";reset();
- }catch(err){$("msg").textContent="Could not read that file: "+(err&&err.message?err.message:err)+(f.name.toLowerCase().endsWith(".parquet")?" (Parquet with gzip or zstd compression is not supported; save it with snappy or as CSV.)":"")}
+ }catch(err){$("msg").textContent="Could not read that file: "+(err&&err.message?err.message:err)+(f.name.toLowerCase().endsWith(".parquet")&&!/^The Parquet reader/.test(err&&err.message||"")?" (Parquet with gzip or zstd compression is not supported; save it with snappy or as CSV.)":"")}
 };
 addEventListener("resize",draw);
 matchMedia("(prefers-color-scheme:dark)").addEventListener("change",draw);
